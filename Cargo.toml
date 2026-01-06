@@ -105,3 +105,4 @@ half = { version = "2", optional = true, default-features = false, features = [
 float8 = { version = "0.3.0", optional = true }
 float4 = { version = "0.1.0", optional = true }
 libloading = "0.8"
+blake3 = "1.8.2"

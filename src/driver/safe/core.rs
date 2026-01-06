@@ -425,6 +425,7 @@ impl CudaEvent {
 pub struct CudaStream {
     pub(crate) cu_stream: sys::CUstream,
     pub(crate) ctx: Arc<CudaContext>,
+    allocator: CudaAllocator,
 }
 
 unsafe impl Send for CudaStream {}
@@ -449,6 +450,7 @@ impl CudaContext {
         Arc::new(CudaStream {
             cu_stream: std::ptr::null_mut(),
             ctx: self.clone(),
+            allocator: CudaAllocator::System,
         })
     }
 
@@ -458,6 +460,7 @@ impl CudaContext {
             // See https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html#group__CUDART__TYPES_1g7b7129befd6f52708309acafd1c46197
             cu_stream: 0x2 as _,
             ctx: self.clone(),
+            allocator: CudaAllocator::System,
         })
     }
 
@@ -475,6 +478,7 @@ impl CudaContext {
         Ok(Arc::new(CudaStream {
             cu_stream,
             ctx: self.clone(),
+            allocator: CudaAllocator::System,
         }))
     }
 }
@@ -488,6 +492,7 @@ impl CudaStream {
         let stream = Arc::new(CudaStream {
             cu_stream,
             ctx: self.ctx.clone(),
+            allocator: self.allocator.clone(),
         });
         stream.join(self)?;
         Ok(stream)
@@ -551,6 +556,24 @@ impl CudaStream {
     }
 }
 
+#[derive(Debug)]
+pub(crate) enum CudaAllocType {
+    System,
+    Arena(ArenaAllocType),
+}
+
+#[derive(Debug)]
+pub(crate) enum ArenaAllocType {
+    Pooled,
+    Interned,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CudaAllocator {
+    System,
+    Arena { arena: Arc<super::arena::CudaArena> },
+}
+
 /// `Vec<T>` on a cuda device. You can allocate and modify this with [CudaStream].
 ///
 /// This object is thread safe.
@@ -562,6 +585,7 @@ pub struct CudaSlice<T> {
     pub(crate) write: Option<CudaEvent>,
     pub(crate) stream: Arc<CudaStream>,
     pub(crate) marker: PhantomData<*const T>,
+    pub(crate) allocation: CudaAllocType,
 }
 
 unsafe impl<T> Send for CudaSlice<T> {}
@@ -576,13 +600,17 @@ impl<T> Drop for CudaSlice<T> {
         if let Some(write) = self.write.as_ref() {
             ctx.record_err(self.stream.wait(write));
         }
-        if ctx.has_async_alloc {
-            ctx.record_err(unsafe {
-                result::free_async(self.cu_device_ptr, self.stream.cu_stream)
-            });
-        } else {
-            ctx.record_err(self.stream.synchronize());
-            ctx.record_err(unsafe { result::free_sync(self.cu_device_ptr) });
+
+        // only free this slice if it isn't managed by an arena
+        if matches!(self.allocation, CudaAllocType::System) {
+            if ctx.has_async_alloc {
+                ctx.record_err(unsafe {
+                    result::free_async(self.cu_device_ptr, self.stream.cu_stream)
+                });
+            } else {
+                ctx.record_err(self.stream.synchronize());
+                ctx.record_err(unsafe { result::free_sync(self.cu_device_ptr) });
+            }
         }
     }
 }
@@ -1242,6 +1270,7 @@ impl CudaStream {
             write: None,
             stream: self.clone(),
             marker: PhantomData,
+            allocation: CudaAllocType::System,
         })
     }
 
@@ -1273,6 +1302,7 @@ impl CudaStream {
             write,
             stream: self.clone(),
             marker: PhantomData,
+            allocation: CudaAllocType::System,
         })
     }
 
@@ -1911,6 +1941,7 @@ impl CudaModule {
             write: None,
             stream: stream.clone(),
             marker: PhantomData,
+            allocation: CudaAllocType::System,
         })
     }
 }
@@ -2176,6 +2207,7 @@ impl CudaStream {
             write,
             stream: self.clone(),
             marker: PhantomData,
+            allocation: CudaAllocType::System,
         }
     }
 }

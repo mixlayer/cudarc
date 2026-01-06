@@ -1,5 +1,6 @@
 //! Safe abstractions over [crate::driver::result] provided by [CudaSlice], [CudaContext], [CudaStream], and more.
 
+pub(crate) mod arena;
 pub(crate) mod core;
 pub(crate) mod external_memory;
 pub(crate) mod graph;
