@@ -562,6 +562,10 @@ pub struct CudaSlice<T> {
     pub(crate) write: Option<CudaEvent>,
     pub(crate) stream: Arc<CudaStream>,
     pub(crate) marker: PhantomData<*const T>,
+
+    /// Slice is managed by an external pool or allocator and
+    /// should not be freed in Drop.
+    managed: bool,
 }
 
 unsafe impl<T> Send for CudaSlice<T> {}
@@ -569,20 +573,22 @@ unsafe impl<T> Sync for CudaSlice<T> {}
 
 impl<T> Drop for CudaSlice<T> {
     fn drop(&mut self) {
-        let ctx = &self.stream.ctx;
-        if let Some(read) = self.read.as_ref() {
-            ctx.record_err(self.stream.wait(read));
-        }
-        if let Some(write) = self.write.as_ref() {
-            ctx.record_err(self.stream.wait(write));
-        }
-        if ctx.has_async_alloc {
-            ctx.record_err(unsafe {
-                result::free_async(self.cu_device_ptr, self.stream.cu_stream)
-            });
-        } else {
-            ctx.record_err(self.stream.synchronize());
-            ctx.record_err(unsafe { result::free_sync(self.cu_device_ptr) });
+        if !self.managed {
+            let ctx = &self.stream.ctx;
+            if let Some(read) = self.read.as_ref() {
+                ctx.record_err(self.stream.wait(read));
+            }
+            if let Some(write) = self.write.as_ref() {
+                ctx.record_err(self.stream.wait(write));
+            }
+            if ctx.has_async_alloc {
+                ctx.record_err(unsafe {
+                    result::free_async(self.cu_device_ptr, self.stream.cu_stream)
+                });
+            } else {
+                ctx.record_err(self.stream.synchronize());
+                ctx.record_err(unsafe { result::free_sync(self.cu_device_ptr) });
+            }
         }
     }
 }
@@ -1242,6 +1248,7 @@ impl CudaStream {
             write: None,
             stream: self.clone(),
             marker: PhantomData,
+            managed: false,
         })
     }
 
@@ -1273,6 +1280,7 @@ impl CudaStream {
             write,
             stream: self.clone(),
             marker: PhantomData,
+            managed: false,
         })
     }
 
@@ -1911,6 +1919,7 @@ impl CudaModule {
             write: None,
             stream: stream.clone(),
             marker: PhantomData,
+            managed: false,
         })
     }
 }
@@ -2118,6 +2127,19 @@ impl CudaFunction {
 }
 
 impl<T> CudaSlice<T> {
+    pub unsafe fn leak_managed(&self) -> Self {
+        Self {
+            cu_device_ptr: self.cu_device_ptr,
+            len: self.len,
+            //FIXME handle these events properly
+            read: None,
+            write: None,
+            stream: self.stream.clone(),
+            marker: self.marker,
+            managed: true,
+        }
+    }
+
     /// Takes ownership of the underlying [sys::CUdeviceptr]. **It is up
     /// to the owner to free this value**.
     ///
@@ -2176,6 +2198,7 @@ impl CudaStream {
             write,
             stream: self.clone(),
             marker: PhantomData,
+            managed: false,
         }
     }
 }
